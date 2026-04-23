@@ -39,8 +39,25 @@ class Sample:
 
 class AntiSpoofDataset(Dataset):
     def __init__(self, samples: list[Sample], train: bool):
-        self.samples = samples
+        self.original_samples = list(samples)
         self.train = train
+        self.samples: list[Sample] = list(samples)
+
+    def oversample_minority(self, target_ratio: float = 0.33) -> None:
+        if not self.train:
+            return
+        live = [s for s in self.samples if s.is_live]
+        spoof = [s for s in self.samples if not s.is_live]
+        if not live or not spoof:
+            return
+        target_live = max(int(len(spoof) * target_ratio), len(live))
+        if target_live <= len(live):
+            return
+        multiplier = target_live // len(live)
+        remainder = target_live % len(live)
+        oversampled = live * multiplier + live[:remainder]
+        self.samples = spoof + oversampled
+        random.shuffle(self.samples)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -218,6 +235,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+class FocalLoss(nn.Module):
+    def __init__(self, gamma: float = 2.0, weight: torch.Tensor | None = None):
+        super().__init__()
+        self.gamma = gamma
+        self.weight = weight
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce = nn.functional.cross_entropy(logits, targets, weight=self.weight, reduction="none")
+        pt = torch.exp(-ce)
+        loss = ((1.0 - pt) ** self.gamma) * ce
+        return loss.mean()
+
+
 def main() -> None:
     args = parse_args()
     random.seed(args.seed)
@@ -237,6 +267,7 @@ def main() -> None:
         raise RuntimeError("Split train kosong. Periksa manifest/split.")
 
     train_ds = AntiSpoofDataset(train_samples, train=True)
+    train_ds.oversample_minority(target_ratio=0.33)
     val_ds = AntiSpoofDataset(val_samples, train=False)
     test_ds = AntiSpoofDataset(test_samples, train=False)
 
@@ -273,13 +304,12 @@ def main() -> None:
     if args.no_class_weights:
         criterion = nn.CrossEntropyLoss()
     else:
-        train_live = sum(1 for s in train_samples if s.is_live)
-        train_spoof = sum(1 for s in train_samples if not s.is_live)
-        # Target index: 0=spoof, 1=live, 2=unused
+        train_live = sum(1 for s in train_ds.samples if s.is_live)
+        train_spoof = sum(1 for s in train_ds.samples if not s.is_live)
         w_spoof = (train_live + train_spoof) / max(train_spoof, 1)
         w_live = (train_live + train_spoof) / max(train_live, 1)
         class_weights = torch.tensor([w_spoof, w_live, 0.5], dtype=torch.float32, device=device)
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        criterion = FocalLoss(gamma=2.0, weight=class_weights)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(args.epochs, 1))
 
@@ -288,7 +318,7 @@ def main() -> None:
     best_path = output_dir / f"best_{args.model_name}"
 
     print(f"device={device}")
-    print(f"train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")
+    print(f"train={len(train_ds)} (live={sum(1 for s in train_ds.samples if s.is_live)}, spoof={sum(1 for s in train_ds.samples if not s.is_live)}) val={len(val_ds)} test={len(test_ds)}")
     print(f"init_weights={init_weights}")
 
     for epoch in range(1, args.epochs + 1):

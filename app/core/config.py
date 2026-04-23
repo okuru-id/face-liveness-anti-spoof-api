@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     rate_limit_per_minute: int = 60
 
-    anti_spoof_model_path: str = "models/active/antispoof/best_2.7_80x80_MiniFASNetV2.onnx,models/active/antispoof/best_4_0_0_80x80_MiniFASNetV1SE.onnx"
+    anti_spoof_model_path: str = "models/active/antispoof/best_2.7_80x80_MiniFASNetV2.onnx"
     fft_enabled: bool = True
     fft_weight: float = 0.4
     fas_weight: float = 0.6

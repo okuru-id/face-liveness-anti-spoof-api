@@ -138,13 +138,21 @@ def _save_crop(
     rows: list[dict],
     jpeg_quality: int,
 ) -> bool:
+    src_h, src_w = frame.shape[:2]
     face = face_detector.detect(frame)
-    if not face.detected or not face.bbox:
-        return False
-
-    crop = _scaled_crop(frame, face.bbox, scale=2.7)
-    if crop.size == 0:
-        return False
+    if face.detected and face.bbox:
+        crop = _scaled_crop(frame, face.bbox, scale=2.7)
+        if crop.size == 0:
+            return False
+    else:
+        # Banyak sample hasil curation manual sudah berupa face crop kecil.
+        # Untuk kasus itu, pakai seluruh image agar sample tidak terbuang.
+        short_side = min(src_h, src_w)
+        long_side = max(src_h, src_w)
+        if short_side < 40 or (short_side <= 192 and long_side / max(short_side, 1) <= 1.5):
+            crop = frame
+        else:
+            return False
 
     crop = cv2.resize(crop, (80, 80), interpolation=cv2.INTER_LINEAR)
     label_dir = output_root / "images" / label
@@ -169,16 +177,104 @@ def _save_crop(
     return True
 
 
+def _process_display_spoof_csv(
+    dataset_root: Path,
+    output_root: Path,
+    max_frames_per_video: int,
+    counters: dict[str, int],
+    rows: list[dict],
+    jpeg_quality: int,
+) -> None:
+    csv_path = dataset_root / "display_spoof.csv"
+    files_root = dataset_root / "files"
+    if not csv_path.exists():
+        return
+    with csv_path.open("r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rel = (row.get("file") or "").strip().lstrip("/")
+            if not rel:
+                continue
+            path = files_root / rel if not Path(rel).is_absolute() else Path(rel)
+            if not path.exists():
+                path = dataset_root / rel
+            if not path.exists():
+                continue
+            stem = Path(rel).stem
+            group_id = f"spoof3::display::{stem}"
+            frames = _sample_video_frames(path, max_frames_per_video)
+            for frame in frames:
+                _save_crop(
+                    frame=frame,
+                    label="spoof",
+                    spoof_type="display",
+                    source_dataset="anti-spoofing-3",
+                    source_file=str(path),
+                    group_id=group_id,
+                    output_root=output_root,
+                    counters=counters,
+                    rows=rows,
+                    jpeg_quality=jpeg_quality,
+                )
+
+
+def _iter_labeled_images(root: Path):
+    for image_path in sorted(root.rglob("*")):
+        if not image_path.is_file():
+            continue
+        if image_path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+            continue
+        yield image_path
+
+
+def _process_flat_labeled_dir(
+    labeled_dir: Path,
+    label: str,
+    spoof_type: str,
+    source_dataset: str,
+    group_prefix: str,
+    output_root: Path,
+    counters: dict[str, int],
+    rows: list[dict],
+    jpeg_quality: int,
+) -> None:
+    if not labeled_dir.exists() or not labeled_dir.is_dir():
+        return
+
+    for image_path in _iter_labeled_images(labeled_dir):
+        image = cv2.imread(str(image_path))
+        if image is None:
+            continue
+
+        rel_path = image_path.relative_to(labeled_dir)
+        group_name = "__".join(rel_path.with_suffix("").parts)
+        _save_crop(
+            frame=image,
+            label=label,
+            spoof_type=spoof_type,
+            source_dataset=source_dataset,
+            source_file=str(image_path),
+            group_id=f"{group_prefix}::{group_name}",
+            output_root=output_root,
+            counters=counters,
+            rows=rows,
+            jpeg_quality=jpeg_quality,
+        )
+
+
 def build_dataset(
     dataset_live_root: Path,
     dataset_attack_root: Path,
     extra_labeled_dir: Path | None,
+    flat_live_dir: Path | None,
+    flat_spoof_dir: Path | None,
     output_root: Path,
     max_frames_per_video: int,
     train_ratio: float,
     val_ratio: float,
     seed: int,
     jpeg_quality: int,
+    dataset_display_spoof_root: Path | None = None,
 ) -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
@@ -300,6 +396,42 @@ def build_dataset(
                 jpeg_quality=jpeg_quality,
             )
 
+    if flat_live_dir is not None:
+        _process_flat_labeled_dir(
+            labeled_dir=flat_live_dir,
+            label="live",
+            spoof_type="none",
+            source_dataset="training_data_live",
+            group_prefix="live-flat",
+            output_root=output_root,
+            counters=counters,
+            rows=rows,
+            jpeg_quality=jpeg_quality,
+        )
+
+    if flat_spoof_dir is not None:
+        _process_flat_labeled_dir(
+            labeled_dir=flat_spoof_dir,
+            label="spoof",
+            spoof_type="unknown",
+            source_dataset="training_data_spoof",
+            group_prefix="spoof-flat",
+            output_root=output_root,
+            counters=counters,
+            rows=rows,
+            jpeg_quality=jpeg_quality,
+        )
+
+    if dataset_display_spoof_root is not None:
+        _process_display_spoof_csv(
+            dataset_root=dataset_display_spoof_root,
+            output_root=output_root,
+            max_frames_per_video=max_frames_per_video,
+            counters=counters,
+            rows=rows,
+            jpeg_quality=jpeg_quality,
+        )
+
     if not rows:
         raise RuntimeError("Tidak ada sample berhasil diproses. Periksa path dataset dan model face detector.")
 
@@ -353,8 +485,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--extra-labeled-dir",
-        default=str(PROJECT_ROOT / "data-test"),
+        default="",
         help="Folder image tambahan berlabel via nama file (mengandung 'live'/'spoof')",
+    )
+    parser.add_argument(
+        "--flat-live-dir",
+        default=str(PROJECT_ROOT / "training_data" / "live"),
+        help="Folder root image live yang sudah dipisah manual",
+    )
+    parser.add_argument(
+        "--flat-spoof-dir",
+        default=str(PROJECT_ROOT / "training_data" / "spoof"),
+        help="Folder root image spoof yang sudah dipisah manual",
+    )
+    parser.add_argument(
+        "--dataset-display-spoof-root",
+        default=str(PROJECT_ROOT / "training_data" / "anti-spoofing-3"),
+        help="Path root dataset display spoof (punya display_spoof.csv dan folder files/)",
     )
     parser.add_argument("--max-frames-per-video", type=int, default=8)
     parser.add_argument("--train-ratio", type=float, default=0.8)
@@ -370,12 +517,15 @@ def main() -> None:
         dataset_live_root=Path(args.dataset_live_root),
         dataset_attack_root=Path(args.dataset_attack_root),
         extra_labeled_dir=Path(args.extra_labeled_dir) if args.extra_labeled_dir else None,
+        flat_live_dir=Path(args.flat_live_dir) if args.flat_live_dir else None,
+        flat_spoof_dir=Path(args.flat_spoof_dir) if args.flat_spoof_dir else None,
         output_root=Path(args.output_root),
         max_frames_per_video=max(1, args.max_frames_per_video),
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         seed=args.seed,
         jpeg_quality=max(60, min(100, args.jpeg_quality)),
+        dataset_display_spoof_root=Path(args.dataset_display_spoof_root) if args.dataset_display_spoof_root else None,
     )
 
 
