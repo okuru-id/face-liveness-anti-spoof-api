@@ -228,7 +228,8 @@
       background: #fbfcf8;
     }
 
-    input[type="text"] {
+    input[type="text"],
+    select {
       width: 100%;
       border: 1px solid var(--line-strong);
       border-radius: 18px;
@@ -242,7 +243,8 @@
       transition: border-color 0.18s ease, box-shadow 0.18s ease;
     }
 
-    input[type="text"]:focus {
+    input[type="text"]:focus,
+    select:focus {
       border-color: var(--text);
       box-shadow: inset 0 0 0 1px var(--text);
     }
@@ -486,6 +488,10 @@
       <div class="right-col">
         <span class="section-label">Control</span>
         <input type="text" id="apiKey" placeholder="Masukkan X-API-Key" value="" />
+        <select id="cameraFacing" aria-label="Pilih kamera">
+          <option value="user">Kamera Depan</option>
+          <option value="environment">Kamera Belakang</option>
+        </select>
 
         <div class="controls">
           <button id="modeUpload" class="btn-secondary">Upload File</button>
@@ -572,6 +578,7 @@
     const stopStreamBtn = document.getElementById('stopStreamBtn')
     const result = document.getElementById('result')
     const apiKeyInput = document.getElementById('apiKey')
+    const cameraFacingSelect = document.getElementById('cameraFacing')
     const debugToggle = document.getElementById('debugToggle')
     const modeBadge = document.getElementById('modeBadge')
     const DEBUG_STORAGE_KEY = 'liveness-demo-debug-mode'
@@ -606,6 +613,7 @@
     let sessionExpiresAt = null
     let sessionExpiryTimer = null
     let sessionWarningShown = false
+    let preferredFacingMode = 'user'
 
     const savedApiKey = window.localStorage.getItem(API_KEY_STORAGE_KEY)
     if (savedApiKey) {
@@ -620,6 +628,13 @@
         window.localStorage.removeItem(API_KEY_STORAGE_KEY)
       }
     })
+
+    if (cameraFacingSelect) {
+      preferredFacingMode = cameraFacingSelect.value === 'environment' ? 'environment' : 'user'
+      cameraFacingSelect.addEventListener('change', () => {
+        preferredFacingMode = cameraFacingSelect.value === 'environment' ? 'environment' : 'user'
+      })
+    }
 
     function setModeBadge(text, kind = 'idle') {
       modeBadge.textContent = text
@@ -842,7 +857,7 @@
       }
     }
 
-    async function requestCameraStream() {
+    async function requestCameraStream(facingMode = 'user') {
       if (!hasMediaDevices) {
         throw new Error('Browser tidak mendukung getUserMedia.')
       }
@@ -850,9 +865,12 @@
         throw new Error('Akses kamera membutuhkan HTTPS atau localhost/127.0.0.1.')
       }
 
+      const preferred = facingMode === 'environment' ? 'environment' : 'user'
+      const fallback = preferred === 'environment' ? 'user' : 'environment'
       const constraintsCandidates = [
-        { video: { facingMode: { ideal: 'user' } }, audio: false },
-        { video: { facingMode: 'user' }, audio: false },
+        { video: { facingMode: { ideal: preferred } }, audio: false },
+        { video: { facingMode: preferred }, audio: false },
+        { video: { facingMode: { ideal: fallback } }, audio: false },
         { video: true, audio: false },
       ]
 
@@ -868,9 +886,21 @@
       throw lastError || new Error('Gagal mengakses kamera.')
     }
 
-    async function attachWebcam(activeStream) {
+    function shouldMirrorWebcam(activeStream, requestedFacing = 'user') {
+      const videoTrack = activeStream?.getVideoTracks?.()[0]
+      const trackFacing = videoTrack?.getSettings?.()?.facingMode
+      if (trackFacing === 'environment') return false
+      if (trackFacing === 'user') return true
+      return requestedFacing !== 'environment'
+    }
+
+    async function attachWebcam(activeStream, requestedFacing = 'user') {
       webcam.srcObject = activeStream
-      webcam.classList.add('is-mirrored')
+      if (shouldMirrorWebcam(activeStream, requestedFacing)) {
+        webcam.classList.add('is-mirrored')
+      } else {
+        webcam.classList.remove('is-mirrored')
+      }
       webcam.classList.add('is-visible')
       webcam.style.display = 'block'
       try {
@@ -890,6 +920,11 @@
       stopStreamBtn.disabled = true
       startStreamBtn.disabled = false
       submitBtn.disabled = false
+      captureBtn.style.display = 'none'
+      cancelCamBtn.style.display = 'none'
+      modeUpload.style.display = 'block'
+      modeWebcam.style.display = 'block'
+      submitBtn.style.display = 'block'
       stopCountdown()
       setModeBadge('Idle', 'idle')
       currentSessionId = null
@@ -915,10 +950,14 @@
       webcamCanvas.width = webcam.videoWidth
       webcamCanvas.height = webcam.videoHeight
       ctx.clearRect(0, 0, webcamCanvas.width, webcamCanvas.height)
-      ctx.save()
-      ctx.scale(-1, 1)
-      ctx.drawImage(webcam, -webcamCanvas.width, 0, webcamCanvas.width, webcamCanvas.height)
-      ctx.restore()
+      if (webcam.classList.contains('is-mirrored')) {
+        ctx.save()
+        ctx.scale(-1, 1)
+        ctx.drawImage(webcam, -webcamCanvas.width, 0, webcamCanvas.width, webcamCanvas.height)
+        ctx.restore()
+      } else {
+        ctx.drawImage(webcam, 0, 0, webcamCanvas.width, webcamCanvas.height)
+      }
       return webcamCanvas.toDataURL('image/jpeg', 0.9).split(',')[1]
     }
 
@@ -1208,7 +1247,7 @@
 
     modeWebcam.addEventListener('click', async () => {
       if (!hasMediaDevices) {
-        fileInput.setAttribute('capture', 'user')
+        fileInput.setAttribute('capture', preferredFacingMode)
         setModeBadge('Fallback', 'warn')
         streamHint.textContent = 'Webcam direct tidak tersedia. Kamera akan dibuka lewat picker native.'
         fileInput.click()
@@ -1216,8 +1255,8 @@
       }
       try {
         resetView()
-        stream = await requestCameraStream()
-        await attachWebcam(stream)
+        stream = await requestCameraStream(preferredFacingMode)
+        await attachWebcam(stream, preferredFacingMode)
         placeholder.style.display = 'none'
         captureBtn.style.display = 'block'
         cancelCamBtn.style.display = 'block'
@@ -1241,14 +1280,14 @@
       try {
         if (!stream) {
           try {
-            stream = await requestCameraStream()
+            stream = await requestCameraStream(preferredFacingMode)
           } catch (camErr) {
             result.textContent = 'Kamera tidak bisa diakses. Pastikan:\n• Buka via HTTPS atau localhost\n• Izinkan akses kamera di browser\nError: ' + (camErr?.message || String(camErr))
             setModeBadge('Camera Error', 'warn')
             return
           }
         }
-        await attachWebcam(stream)
+        await attachWebcam(stream, preferredFacingMode)
         preview.style.display = 'none'
         placeholder.style.display = 'none'
         captureBtn.style.display = 'none'
