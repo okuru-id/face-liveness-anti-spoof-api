@@ -102,6 +102,8 @@ def determine_verdict(
             return Verdict.SPOOF, final_score, resolve_spoof_type()
         if mini_fas_score <= spoof_thresh:
             return Verdict.SPOOF, final_score, resolve_spoof_type()
+        if mini_fas_score < settings.blurry_live_min_confidence:
+            return Verdict.SPOOF, final_score, resolve_spoof_type()
 
     if final_score >= live_thresh:
         return Verdict.LIVE, final_score, None

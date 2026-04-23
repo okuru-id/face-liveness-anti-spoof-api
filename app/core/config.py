@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     blurry_low_fft_spoof_threshold: float = 0.34
     blurry_high_blur_min: float = 40.0
     blurry_low_blur_max: float = 25.0
+    blurry_live_min_confidence: float = 0.75
     prod_fft_spoof_override_threshold: float = 0.62
     prod_blur_fft_spoof_threshold: float = 0.62
     prod_blurry_high_fft_spoof_threshold: float = 0.48

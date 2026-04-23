@@ -107,6 +107,9 @@ def _split_groups(group_ids: list[str], train_ratio: float, val_ratio: float, rn
     return mapping
 
 
+HARD_NEGATIVE_FORCE_TRAIN = {"spoof-extra::spoof-9", "spoof-extra::spoof-10"}
+
+
 def _assign_split(rows: list[dict], train_ratio: float, val_ratio: float, seed: int) -> None:
     rng = random.Random(seed)
     live_groups = sorted({r["group_id"] for r in rows if r["label"] == "live"})
@@ -115,6 +118,9 @@ def _assign_split(rows: list[dict], train_ratio: float, val_ratio: float, seed: 
     split_map = {}
     split_map.update(_split_groups(live_groups, train_ratio, val_ratio, rng))
     split_map.update(_split_groups(spoof_groups, train_ratio, val_ratio, rng))
+
+    for gid in HARD_NEGATIVE_FORCE_TRAIN:
+        split_map[gid] = "train"
 
     for row in rows:
         row["split"] = split_map.get(row["group_id"], "train")
