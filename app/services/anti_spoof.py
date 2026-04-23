@@ -100,7 +100,7 @@ class AntiSpoofService:
             if crop.size == 0:
                 continue
             resized = cv2.resize(crop, (model_cfg['out_w'], model_cfg['out_h']), interpolation=cv2.INTER_LINEAR)
-            img = resized.astype(np.float32)
+            img = resized.astype(np.float32) / 255.0
             img = np.transpose(img, (2, 0, 1))
             tensor = np.expand_dims(img, axis=0).astype(np.float32)
             logits = model_cfg['session'].run(

@@ -23,6 +23,21 @@ def _extract_blur_score(quality_issues: list[str]) -> float | None:
     return None
 
 
+def _extract_live_score(anti_spoof_result: AntiSpoofResult) -> float:
+    if isinstance(anti_spoof_result.debug, dict):
+        avg_probs = anti_spoof_result.debug.get("avg_probs")
+        if isinstance(avg_probs, list) and len(avg_probs) > 1:
+            try:
+                return float(avg_probs[1])
+            except (TypeError, ValueError):
+                pass
+
+    if anti_spoof_result.label == SpoofLabel.LIVE:
+        return float(anti_spoof_result.confidence)
+
+    return float(max(0.0, 1.0 - anti_spoof_result.confidence))
+
+
 def determine_verdict(
     anti_spoof_result: AntiSpoofResult,
     face_detected: bool,
@@ -39,7 +54,7 @@ def determine_verdict(
     if has_hard_quality_issue:
         return Verdict.POOR_QUALITY, 0.0, None
 
-    mini_fas_score = anti_spoof_result.confidence
+    mini_fas_score = _extract_live_score(anti_spoof_result)
     live_thresh = settings.effective_live_threshold
     spoof_thresh = settings.effective_spoof_threshold
 
@@ -50,7 +65,7 @@ def determine_verdict(
     # For live likelihood: we need high FFT to mean low live score
     fft_live_score = 1.0 - fft_score
 
-    # Fusion: weighted average of MiniFASNet confidence and FFT live score
+    # Fusion: weighted average of MiniFASNet live score and FFT live score
     final_score = (mini_fas_score * fas_weight) + (fft_live_score * fft_weight)
 
     def resolve_spoof_type() -> SpoofType:
@@ -85,8 +100,8 @@ def determine_verdict(
 
         if fft_score >= settings.effective_blur_fft_spoof_threshold:
             return Verdict.SPOOF, final_score, resolve_spoof_type()
-        if mini_fas_score < 0.995:
-            return Verdict.UNCERTAIN, final_score, None
+        if mini_fas_score <= spoof_thresh:
+            return Verdict.SPOOF, final_score, resolve_spoof_type()
 
     if final_score >= live_thresh:
         return Verdict.LIVE, final_score, None

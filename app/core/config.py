@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     fft_log_scale: bool = True
     fft_spoof_override_threshold: float = 0.6
     blur_fft_spoof_threshold: float = 0.6
-    blurry_high_fft_spoof_threshold: float = 0.46
+    blurry_high_fft_spoof_threshold: float = 0.44
     blurry_low_fft_spoof_threshold: float = 0.34
     blurry_high_blur_min: float = 40.0
     blurry_low_blur_max: float = 25.0
