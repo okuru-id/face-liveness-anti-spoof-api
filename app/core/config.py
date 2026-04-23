@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     rate_limit_per_minute: int = 60
 
-    anti_spoof_model_path: str = "models/active/antispoof/best_2.7_80x80_MiniFASNetV2.pth,models/active/antispoof/best_4_0_0_80x80_MiniFASNetV1SE.pth"
+    anti_spoof_model_path: str = "models/active/antispoof/best_2.7_80x80_MiniFASNetV2.onnx,models/active/antispoof/best_4_0_0_80x80_MiniFASNetV1SE.onnx"
     fft_enabled: bool = True
     fft_weight: float = 0.4
     fas_weight: float = 0.6
@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     prod_blurry_low_fft_spoof_threshold: float = 0.33
     prod_blurry_high_blur_min: float = 45.0
     prod_blurry_low_blur_max: float = 22.0
-    rppg_model_path: str = "models/active/rppg/UBFC-rPPG_PhysNet_DiffNormalized.pth"
+    rppg_model_path: str = "models/active/rppg/UBFC-rPPG_PhysNet_DiffNormalized.onnx"
     retinaface_deploy_path: str = "models/active/face_detector/deploy.prototxt"
     retinaface_caffemodel_path: str = "models/active/face_detector/Widerface-RetinaFace.caffemodel"
 

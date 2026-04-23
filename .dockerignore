@@ -1,1 +1,24 @@
+.git/
+__pycache__/
+*.pyc
+*.pyo
+
+.venv/
+.venv-training/
+.venv*/
+venv/
+env/
+
 data-test/
+training_data/
+
+tests/
+scripts/
+docs/
+
+*.log
+
+# Keep only active runtime models in docker context
+models/*
+!models/active/
+!models/active/**

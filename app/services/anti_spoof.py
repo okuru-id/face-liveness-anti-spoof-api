@@ -2,18 +2,11 @@ from enum import Enum
 from typing import NamedTuple
 import cv2
 import numpy as np
+import onnxruntime as ort
 from pathlib import Path
 from app.core.config import settings
 from app.core.errors import ModelUnavailableError
-from app.vendor.silent_face_utility import get_kernel, parse_model_name
-from app.vendor.mini_fasnet import MiniFASNetV1, MiniFASNetV2, MiniFASNetV1SE, MiniFASNetV2SE
-
-MODEL_MAPPING = {
-    'MiniFASNetV1': MiniFASNetV1,
-    'MiniFASNetV2': MiniFASNetV2,
-    'MiniFASNetV1SE': MiniFASNetV1SE,
-    'MiniFASNetV2SE': MiniFASNetV2SE,
-}
+from app.vendor.silent_face_utility import parse_model_name
 
 
 class SpoofLabel(str, Enum):
@@ -32,38 +25,59 @@ class AntiSpoofService:
         raw_paths = model_path or settings.anti_spoof_model_path
         self.model_paths = [Path(part.strip()) for part in raw_paths.split(',') if part.strip()]
         self._models: list[dict] = []
+        self._session_options = ort.SessionOptions()
+        self._session_options.intra_op_num_threads = settings.onnx_intra_op_threads
+        self._session_options.inter_op_num_threads = settings.onnx_inter_op_threads
+
+    def _resolve_runtime_model_path(self, model_path: Path) -> Path:
+        if model_path.suffix.lower() == ".pth":
+            onnx_candidate = model_path.with_suffix(".onnx")
+            if onnx_candidate.exists():
+                return onnx_candidate
+        return model_path
+
+    def _metadata_name_for_parse(self, model_path: Path) -> str:
+        if model_path.suffix.lower() == ".onnx":
+            return f"{model_path.stem}.pth"
+        return model_path.name
+
+    @staticmethod
+    def _softmax(logits: np.ndarray) -> np.ndarray:
+        shifted = logits - np.max(logits, axis=1, keepdims=True)
+        exp = np.exp(shifted)
+        return exp / np.sum(exp, axis=1, keepdims=True)
 
     def _load(self):
         if self._models:
             return
         try:
-            import torch
-
-            device = torch.device('cpu')
             for model_path in self.model_paths:
-                model_name = model_path.name
+                runtime_model_path = self._resolve_runtime_model_path(model_path)
+                if not runtime_model_path.exists():
+                    raise FileNotFoundError(f"Model tidak ditemukan: {runtime_model_path}")
+                if runtime_model_path.suffix.lower() != ".onnx":
+                    raise RuntimeError(
+                        f"Model runtime harus .onnx (ditemukan: {runtime_model_path.name}). "
+                        "Jalankan scripts/export_pth_to_onnx.sh terlebih dahulu."
+                    )
+
+                model_name = self._metadata_name_for_parse(runtime_model_path)
                 h_input, w_input, model_type, scale = parse_model_name(model_name)
-                kernel_size = get_kernel(h_input, w_input)
-                model = MODEL_MAPPING[model_type](conv6_kernel=kernel_size).to(device)
-                state_dict = torch.load(str(model_path), map_location=device)
-                keys = iter(state_dict)
-                first_layer_name = next(keys)
-                if first_layer_name.find('module.') >= 0:
-                    from collections import OrderedDict
-                    new_state_dict = OrderedDict()
-                    for key, value in state_dict.items():
-                        new_state_dict[key[7:]] = value
-                    model.load_state_dict(new_state_dict)
-                else:
-                    model.load_state_dict(state_dict)
-                model.eval()
+                session = ort.InferenceSession(
+                    str(runtime_model_path),
+                    sess_options=self._session_options,
+                    providers=["CPUExecutionProvider"],
+                )
+                input_name = session.get_inputs()[0].name
+                output_name = session.get_outputs()[0].name
                 self._models.append({
-                    'path': model_path,
-                    'model': model,
+                    'path': runtime_model_path,
+                    'input_name': input_name,
+                    'output_name': output_name,
+                    'session': session,
                     'scale': scale,
                     'out_h': h_input,
                     'out_w': w_input,
-                    'device': device,
                 })
         except Exception as e:
             raise ModelUnavailableError(f'Failed to load anti-spoof model: {e}')
@@ -73,7 +87,6 @@ class AntiSpoofService:
         if not self._models:
             raise ModelUnavailableError('No anti-spoof model configured')
 
-        import torch
         prediction = np.zeros((1, 3), dtype=np.float32)
         per_model_debug = []
         for model_cfg in self._models:
@@ -89,10 +102,12 @@ class AntiSpoofService:
             resized = cv2.resize(crop, (model_cfg['out_w'], model_cfg['out_h']), interpolation=cv2.INTER_LINEAR)
             img = resized.astype(np.float32)
             img = np.transpose(img, (2, 0, 1))
-            tensor = torch.from_numpy(img).unsqueeze(0).to(model_cfg['device'])
-            with torch.no_grad():
-                out = model_cfg['model'](tensor)
-                probs = torch.softmax(out, dim=1).cpu().numpy()
+            tensor = np.expand_dims(img, axis=0).astype(np.float32)
+            logits = model_cfg['session'].run(
+                [model_cfg['output_name']],
+                {model_cfg['input_name']: tensor},
+            )[0]
+            probs = self._softmax(logits)
             prediction += probs
             per_model_debug.append({
                 'model': model_cfg['path'].name,

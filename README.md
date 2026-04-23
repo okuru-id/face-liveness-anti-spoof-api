@@ -10,12 +10,12 @@ Backend ini menyediakan **API passive anti‑spoofing** berbasis gambar tunggal 
 | **Runtime** | Python 3.13 |
 | **Framework** | FastAPI + Uvicorn / Gunicorn |
 | **Face Detection** | RetinaFace (OpenCV DNN) |
-| **Anti-Spoof** | MiniFASNet V1SE + V2 (PyTorch, model fusion) |
-| **rPPG PhysNet** | PhysNet_padding_Encoder_Decoder_MAX (PyTorch) |
+| **Anti-Spoof** | MiniFASNet V1SE + V2 (ONNXRuntime, model fusion) |
+| **rPPG PhysNet** | PhysNet_padding_Encoder_Decoder_MAX (ONNXRuntime) |
 | **Signal Analysis** | NumPy FFT |
 | **Fusion Engine** | Custom weighted scoring (0.6 anti-spoof + 0.4 rPPG) |
 | **Session Store** | Thread-safe in-memory (TTL configurable) |
-| **ONNX Runtime** | ONNXRuntime (CPU) |
+| **Training** | PyTorch (hanya untuk fine-tune/export) |
 | **Validation** | Pydantic v2 + Pydantic Settings |
 | **Logging** | structlog |
 | **Template** | Jinja2 |
@@ -34,12 +34,12 @@ Backend ini menyediakan **API passive anti‑spoofing** berbasis gambar tunggal 
 # git clone <repo-url>
 # cd liveness-detection
 
-# 2. Buat dan aktifkan virtualenv
+# 2. Buat dan aktifkan virtualenv runtime (CPU-only)
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 
-# 3. Install dependencies
-pip install -r requirements.txt
+# 3. Install dependencies runtime API (tanpa torch)
+pip install -r requirements.runtime.txt
 
 # 4. Siapkan environment variables (opsional)
 # Salin .env.example -> .env dan sesuaikan (API_KEYS, path model, dll.)
@@ -50,6 +50,25 @@ cp .env.example .env
 uvicorn app.main:app --reload
 ```
 Server akan tersedia di `http://127.0.0.1:8000`. Swagger UI dapat diakses di `http://127.0.0.1:8000/docs`.
+
+### Mode Environment yang Direkomendasikan
+
+Pisahkan environment runtime dan training:
+
+- **Runtime API (CPU-only, ringan)**: gunakan `.venv` + `requirements.runtime.txt`
+- **Training/Fine-tune (GPU)**: gunakan `.venv-training` + `requirements.training.txt` + `torch` CUDA wheel
+
+Contoh setup environment training GPU (NVIDIA):
+
+```bash
+python3 -m venv .venv-training
+source .venv-training/bin/activate
+pip install -r requirements.runtime.txt
+pip install --index-url https://download.pytorch.org/whl/cu126 torch
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+Jika output `torch.cuda.is_available()` adalah `True`, training akan memakai GPU.
 
 ## Penggunaan API
 ### Health Check
@@ -76,12 +95,12 @@ Response JSON berisi `request_id`, `verdict`, `confidence`, `spoof_type`, `face_
 
 ## Deployment (Production Server)
 ### 1. Persiapan Docker (disarankan)
-**Dockerfile** (disertakan di repo) membangun image dengan semua dependensi dan menyalakan `uvicorn` menggunakan workers Gunicorn untuk proses terisolasi.
+**Dockerfile** (disertakan di repo) membangun image runtime berbasis ONNX (tanpa `torch`) dan menyalakan `uvicorn` menggunakan workers Gunicorn untuk proses terisolasi.
 ```Dockerfile
 FROM python:3.13-slim
 WORKDIR /app
 COPY . /app
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.runtime.txt
 EXPOSE 8000
 CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "app.main:app", "--bind", "0.0.0.0:8000"]
 ```
@@ -148,24 +167,23 @@ models/detection_model/Widerface-RetinaFace.caffemodel
 Detector ini dipakai agar bounding box wajah konsisten dengan pipeline referensi model anti-spoof.
 
 ### 2. Anti-spoof model
-Model anti-spoof runtime yang dipakai saat ini adalah file `.pth` lokal di dalam project:
+Model anti-spoof runtime yang dipakai saat ini adalah file `.onnx` lokal di dalam project:
 
 ```text
-models/2.7_80x80_MiniFASNetV2.pth
-models/4_0_0_80x80_MiniFASNetV1SE.pth
+models/active/antispoof/best_2.7_80x80_MiniFASNetV2.onnx
+models/active/antispoof/best_4_0_0_80x80_MiniFASNetV1SE.onnx
 ```
 
 Keduanya dijalankan dengan model fusion agar sesuai dengan pipeline referensi repo sumber.
 
 ### 3. rPPG PhysNet model
-Model rPPG PhysNet untuk pipeline stream real-time disalin dari `rPPG-Toolbox`:
+Model rPPG PhysNet runtime untuk pipeline stream real-time menggunakan ONNX:
 
 ```text
-models/UBFC-rPPG_PhysNet_DiffNormalized.pth
-app/vendor/physnet_model.py
+models/active/rppg/UBFC-rPPG_PhysNet_DiffNormalized.onnx
 ```
 
-Arsitektur: `PhysNet_padding_Encoder_Decoder_MAX` (3D-CNN, input `[3, T, 128, 128]`). Model diambil dari `final_model_release/UBFC-rPPG_PhysNet_DiffNormalized.pth` dan disimpan di `app/vendor/` agar project tetap standalone.
+Model ONNX ini berasal dari checkpoint `UBFC-rPPG_PhysNet_DiffNormalized.pth` yang diekspor via `scripts/export_pth_to_onnx.sh`.
 
 ### 4. Konfigurasi model
 Pastikan `.env` menunjuk ke file lokal project:
@@ -173,7 +191,7 @@ Pastikan `.env` menunjuk ke file lokal project:
 ```env
 RETINAFACE_DEPLOY_PATH=models/detection_model/deploy.prototxt
 RETINAFACE_CAFFEMODEL_PATH=models/detection_model/Widerface-RetinaFace.caffemodel
-ANTI_SPOOF_MODEL_PATH=models/2.7_80x80_MiniFASNetV2.pth,models/4_0_0_80x80_MiniFASNetV1SE.pth
+ANTI_SPOOF_MODEL_PATH=models/active/antispoof/best_2.7_80x80_MiniFASNetV2.onnx,models/active/antispoof/best_4_0_0_80x80_MiniFASNetV1SE.onnx
 ```
 
 ### 4. Verifikasi file model
@@ -189,10 +207,10 @@ Semua dependency runtime sekarang harus berada di dalam project ini, tanpa path 
 Jika menggunakan pipeline **stream real-time**, pastikan juga model rPPG tersedia:
 
 ```env
-RPPG_MODEL_PATH=models/UBFC-rPPG_PhysNet_DiffNormalized.pth
+RPPG_MODEL_PATH=models/active/rppg/UBFC-rPPG_PhysNet_DiffNormalized.onnx
 ```
 
-Catatan: model ini disalin dari repo `rPPG-Toolbox` (`final_model_release/UBFC-rPPG_PhysNet_DiffNormalized.pth`) agar project ini standalone tanpa dependency path eksternal.
+Catatan: model ONNX ini diekspor dari checkpoint repo `rPPG-Toolbox` (`final_model_release/UBFC-rPPG_PhysNet_DiffNormalized.pth`) agar runtime API tidak bergantung pada `torch`.
 
 
 ## Demo Stream
@@ -270,7 +288,7 @@ curl -s -X POST http://127.0.0.1:8000/v1/liveness/stream/end \
 ### Komponen Pipeline
 
 - **MiniFASNet Fast Reject**: setiap frame dicek segera; jika spoof terdeteksi dengan confidence tinggi, session langsung ditolak tanpa perlu menunggu frame cukup
-- **rPPG PhysNet ONNX**: model ONNX untuk ekstraksi sinyal fisiologis dari sequence wajah (`models/rppg_physnet.onnx`)
+- **rPPG PhysNet ONNX**: model ONNX untuk ekstraksi sinyal fisiologis dari sequence wajah (`models/active/rppg/UBFC-rPPG_PhysNet_DiffNormalized.onnx`)
 - **Signal Analyzer**: hitung SNR, peak count, estimasi heart-rate, dan `signal_confidence` via FFT
 - **Fusion Engine**: gabungkan skor MiniFASNet (bobot 0.6) dan rPPG (bobot 0.4) untuk keputusan akhir (`LIVE`, `SPOOF`, `UNCERTAIN`)
 
@@ -282,13 +300,13 @@ STREAM_MIN_FRAMES=6          # frame minimum sebelum rPPG dijalankan
 STREAM_FRAME_RATE=6.0        # target fps untuk estimation
 FUSION_LIVE_THRESHOLD=0.7    # skor minimum untuk verdict LIVE
 FUSION_SPOOF_THRESHOLD=0.3   # skor maksimum untuk verdict SPOOF
-RPPG_MODEL_PATH=models/rppg_physnet.onnx
+RPPG_MODEL_PATH=models/active/rppg/UBFC-rPPG_PhysNet_DiffNormalized.onnx
 ```
 
 ### Catatan
 
 - Session disimpan di memory dengan TTL 30 detik
-- Model `rppg_physnet.onnx` wajib ada agar `stream/result` bisa menghasilkan verdict berbasis rPPG
+- Model `UBFC-rPPG_PhysNet_DiffNormalized.onnx` wajib ada agar `stream/result` bisa menghasilkan verdict berbasis rPPG
 - Stream API belum menggunakan WebSocket; client perlu mengirim frame berkala via HTTP polling
 
 ## Fine-Tuning Model Anti-Spoof (Custom Dataset)
@@ -297,7 +315,20 @@ Repo ini sekarang menyediakan script untuk menyiapkan dataset dan fine-tune mode
 
 ### Prasyarat tambahan
 
-- `torch` (GPU sangat disarankan)
+- gunakan environment terpisah (`.venv-training`) untuk training
+- install dependency training (termasuk `torch`):
+
+```bash
+pip install -r requirements.training.txt
+```
+
+- untuk training GPU, install `torch` CUDA wheel (contoh CUDA 12.6):
+
+```bash
+pip install --index-url https://download.pytorch.org/whl/cu126 torch
+```
+
+- GPU sangat disarankan untuk proses training
 - model file bawaan sudah tersedia di folder `models/`
 
 ### 1) Siapkan dataset training dari folder sumber
@@ -334,10 +365,40 @@ Checkpoint terbaik akan disimpan ke:
 Set di `.env`:
 
 ```env
-ANTI_SPOOF_MODEL_PATH=models/finetuned/best_2.7_80x80_MiniFASNetV2.pth,models/4_0_0_80x80_MiniFASNetV1SE.pth
+ANTI_SPOOF_MODEL_PATH=models/active/antispoof/best_2.7_80x80_MiniFASNetV2.onnx,models/active/antispoof/best_4_0_0_80x80_MiniFASNetV1SE.onnx
 ```
 
 Lalu restart server.
+
+### 4) Konversi model `.pth` ke `.onnx`
+
+Gunakan script:
+
+```bash
+scripts/export_pth_to_onnx.sh --help
+```
+
+Contoh convert MiniFASNet:
+
+```bash
+scripts/export_pth_to_onnx.sh \
+  --pth models/active/antispoof/best_2.7_80x80_MiniFASNetV2.pth \
+  --onnx models/active/antispoof/best_2.7_80x80_MiniFASNetV2.onnx
+```
+
+Contoh convert PhysNet (rPPG):
+
+```bash
+scripts/export_pth_to_onnx.sh \
+  --type physnet \
+  --frames 6 \
+  --pth models/active/rppg/UBFC-rPPG_PhysNet_DiffNormalized.pth \
+  --onnx models/active/rppg/UBFC-rPPG_PhysNet_DiffNormalized.onnx
+```
+
+Catatan:
+- Script akan auto-detect tipe model jika `--type` tidak diisi.
+- Untuk PhysNet, output ONNX diekspor dari output sinyal rPPG (`rppg`).
 
 ## Catatan Penting
 - **Threshold LIVE**: untuk deployment saat ini disarankan `LIVE_THRESHOLD=0.90` agar replay screen borderline tidak langsung lolos sebagai `LIVE`; skor di bawah itu akan turun menjadi `UNCERTAIN`.
