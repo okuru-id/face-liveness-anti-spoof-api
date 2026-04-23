@@ -1,5 +1,6 @@
 services:
   api:
+    image: kurob/liveness-detection:latest
     build: .
     restart: unless-stopped
     env_file: .env

@@ -589,8 +589,7 @@
     const streamEndpoint = '{{ api_stream_endpoint }}'
     const API_KEY_STORAGE_KEY = 'liveness-demo-api-key'
     const hasMediaDevices = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
-    // Allow getUserMedia even on non‑HTTPS for demo purposes on mobile
-    const isSecurePage = true
+    const isSecureOrigin = window.isSecureContext || ['localhost', '127.0.0.1'].includes(window.location.hostname)
 
 
     let base64Image = null
@@ -840,6 +839,44 @@
       if (stream) {
         stream.getTracks().forEach(track => track.stop())
         stream = null
+      }
+    }
+
+    async function requestCameraStream() {
+      if (!hasMediaDevices) {
+        throw new Error('Browser tidak mendukung getUserMedia.')
+      }
+      if (!isSecureOrigin) {
+        throw new Error('Akses kamera membutuhkan HTTPS atau localhost/127.0.0.1.')
+      }
+
+      const constraintsCandidates = [
+        { video: { facingMode: { ideal: 'user' } }, audio: false },
+        { video: { facingMode: 'user' }, audio: false },
+        { video: true, audio: false },
+      ]
+
+      let lastError = null
+      for (const constraints of constraintsCandidates) {
+        try {
+          return await navigator.mediaDevices.getUserMedia(constraints)
+        } catch (err) {
+          lastError = err
+        }
+      }
+
+      throw lastError || new Error('Gagal mengakses kamera.')
+    }
+
+    async function attachWebcam(activeStream) {
+      webcam.srcObject = activeStream
+      webcam.classList.add('is-mirrored')
+      webcam.classList.add('is-visible')
+      webcam.style.display = 'block'
+      try {
+        await webcam.play()
+      } catch (_) {
+        // Some mobile browsers may require additional interaction.
       }
     }
 
@@ -1179,11 +1216,8 @@
       }
       try {
         resetView()
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false })
-        webcam.srcObject = stream
-        webcam.classList.add('is-mirrored')
-        webcam.classList.add('is-visible')
-        webcam.style.display = 'block'
+        stream = await requestCameraStream()
+        await attachWebcam(stream)
         placeholder.style.display = 'none'
         captureBtn.style.display = 'block'
         cancelCamBtn.style.display = 'block'
@@ -1193,10 +1227,9 @@
         setModeBadge('Camera Ready', 'idle')
         streamHint.textContent = 'Kamera aktif. Anda bisa ambil satu foto atau mulai stream detection.'
       } catch (err) {
-        fileInput.setAttribute('capture', 'user')
-        setModeBadge('Fallback', 'warn')
-        result.textContent = 'Gagal mengakses webcam. Fallback ke kamera native. Detail: ' + (err?.message || String(err))
-        fileInput.click()
+        setModeBadge('Camera Error', 'warn')
+        streamHint.textContent = 'Kamera gagal dibuka. Pastikan HTTPS/localhost dan izin kamera aktif.'
+        result.textContent = 'Gagal mengakses webcam. Detail: ' + (err?.message || String(err))
       }
     })
 
@@ -1208,17 +1241,14 @@
       try {
         if (!stream) {
           try {
-            stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false })
+            stream = await requestCameraStream()
           } catch (camErr) {
             result.textContent = 'Kamera tidak bisa diakses. Pastikan:\n• Buka via HTTPS atau localhost\n• Izinkan akses kamera di browser\nError: ' + (camErr?.message || String(camErr))
             setModeBadge('Camera Error', 'warn')
             return
           }
         }
-        webcam.srcObject = stream
-        webcam.classList.add('is-mirrored')
-        webcam.classList.add('is-visible')
-        webcam.style.display = 'block'
+        await attachWebcam(stream)
         preview.style.display = 'none'
         placeholder.style.display = 'none'
         captureBtn.style.display = 'none'
