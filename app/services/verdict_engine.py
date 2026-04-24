@@ -75,7 +75,7 @@ def determine_verdict(
             return SpoofType.SCREEN_REPLAY
         return SpoofType.UNKNOWN
 
-    if fft_score >= settings.effective_fft_spoof_override_threshold:
+    if fft_score >= settings.effective_fft_spoof_override_threshold and final_score <= live_thresh:
         return Verdict.SPOOF, final_score, resolve_spoof_type()
 
     is_blurry = any(issue.startswith("Image too blurry") for issue in quality_issues)

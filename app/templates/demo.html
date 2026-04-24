@@ -915,6 +915,7 @@
         clearTimeout(streamPollTimer)
         streamPollTimer = null
       }
+      clearOverlay()
       isStreaming = false
       isRequestInFlight = false
       stopStreamBtn.disabled = true

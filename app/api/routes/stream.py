@@ -11,7 +11,7 @@ from app.core.config import settings
 from app.core.request_id import generate_request_id
 from app.core.session_store import FrameMeta, session_store
 from app.schemas.liveness import FaceBBox
-from app.services.anti_spoof import anti_spoof_service
+from app.services.anti_spoof import AntiSpoofResult, SpoofLabel, anti_spoof_service
 from app.services.face_detector import face_detector
 from app.services.fft_analysis import get_fft_service
 from app.services.fusion import fuse
@@ -21,6 +21,37 @@ from app.services.signal_analysis import SignalAnalyzer
 from app.services.verdict_engine import determine_verdict
 
 router = APIRouter()
+
+
+def _aggregate_mini_fas_results(frames: list[FrameMeta]):
+    valid_results = [frame.mini_fas_result for frame in frames if isinstance(frame.mini_fas_result.debug, dict)]
+    if not valid_results:
+        return None
+
+    avg_probs_list = []
+    for result in valid_results:
+        probs = result.debug.get("avg_probs")
+        if isinstance(probs, list) and len(probs) == 3:
+            avg_probs_list.append([float(v) for v in probs])
+
+    if not avg_probs_list:
+        return valid_results[-1]
+
+    mean_probs = np.mean(np.asarray(avg_probs_list, dtype=np.float32), axis=0)
+    pred_label = int(np.argmax(mean_probs))
+    confidence = float(mean_probs[pred_label])
+
+    return AntiSpoofResult(
+        label=SpoofLabel.LIVE if pred_label == 1 else SpoofLabel.SPOOF,
+        confidence=confidence,
+        debug={
+            "avg_probs": [round(float(v), 6) for v in mean_probs.tolist()],
+            "pred_label": pred_label,
+            "pred_label_name": "LIVE" if pred_label == 1 else "SPOOF",
+            "aggregation": "mean_over_stream_frames",
+            "frame_count": len(avg_probs_list),
+        },
+    )
 
 
 @router.post("/liveness/stream/init")
@@ -258,20 +289,23 @@ async def get_stream_result(session_id: str, api_key: str = Depends(verify_api_k
     )
 
     latest_frame = session.frames[-1]
-    fusion_result = fuse(latest_frame.mini_fas_result, rppg_result, signal_metrics)
+    aggregate_mini_fas_result = _aggregate_mini_fas_results(session.frames) or latest_frame.mini_fas_result
+    aggregate_fft_score = float(np.median([frame.fft_score for frame in session.frames]))
+    aggregate_blur_score = float(np.median([frame.blur_score for frame in session.frames]))
+    fusion_result = fuse(aggregate_mini_fas_result, rppg_result, signal_metrics)
 
     passive_quality_issues: list[str] = []
-    if latest_frame.blur_score < settings.blur_threshold:
+    if aggregate_blur_score < settings.blur_threshold:
         passive_quality_issues.append(
-            f"Image too blurry: blur_score={latest_frame.blur_score:.2f}, threshold={settings.blur_threshold}"
+            f"Image too blurry: blur_score={aggregate_blur_score:.2f}, threshold={settings.blur_threshold}"
         )
 
     passive_verdict, passive_confidence, passive_spoof_type = determine_verdict(
-        anti_spoof_result=latest_frame.mini_fas_result,
+        anti_spoof_result=aggregate_mini_fas_result,
         face_detected=True,
         quality_passed=True,
         spoof_type=None,
-        fft_score=latest_frame.fft_score,
+        fft_score=aggregate_fft_score,
         quality_issues=passive_quality_issues,
     )
 
@@ -309,7 +343,9 @@ async def get_stream_result(session_id: str, api_key: str = Depends(verify_api_k
             **fusion_result.fusion_debug,
             "signal_confidence": round(fusion_result.signal_confidence, 4),
             "mini_fas_confidence": round(fusion_result.mini_fas_confidence, 4),
-            "fft_score": round(latest_frame.fft_score, 4),
+            "fft_score": round(aggregate_fft_score, 4),
+            "latest_fft_score": round(latest_frame.fft_score, 4),
+            "aggregate_blur_score": round(aggregate_blur_score, 4),
             "passive_verdict": passive_verdict.value,
             "passive_confidence": round(passive_confidence, 4),
             "passive_quality_issues": passive_quality_issues,
